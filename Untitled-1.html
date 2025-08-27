@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Breakout — Special Bricks & Effects</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root{
+      --bg1:#071028; --bg2:#0b243f;
+    }
+    html,body{
+      height:100%;
+      margin:0;
+      background: linear-gradient(160deg,var(--bg1),var(--bg2));
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+      color: #fff;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+    }
+    #gameWrap{
+      position:relative;
+      width:900px;
+      max-width:95vw;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.6);
+      border-radius:10px;
+      overflow:hidden;
+      background: radial-gradient(ellipse at top, rgba(255,255,255,0.02), transparent 30%);
+    }
+    canvas{
+      display:block;
+      background: transparent;
+      width:100%;
+      height:auto;
+      image-rendering: optimizeSpeed;
+    }
+    #hud{
+      position:absolute;
+      top:10px;
+      left:10px;
+      right:10px;
+      display:flex;
+      justify-content:space-between;
+      pointer-events:none;
+      font-weight:600;
+      letter-spacing:.4px;
+    }
+    .hud-left, .hud-right { pointer-events:auto; }
+    button {
+      background:#22c55e;
+      border:none;
+      color:#032;
+      padding:6px 10px;
+      border-radius:6px;
+      font-weight:700;
+      cursor:pointer;
+      margin-left:8px;
+    }
+    .badge {
+      background: rgba(255,255,255,0.06);
+      padding:6px 10px;
+      border-radius:8px;
+      display:inline-flex;
+      gap:10px;
+      align-items:center;
+      font-size:14px;
+    }
+    #menu {
+      position:absolute;
+      inset:0;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      pointer-events:none;
+    }
+    #menu > .panel {
+      pointer-events:auto;
+      background: rgba(0,0,0,0.7);
+      padding:22px;
+      border-radius:12px;
+      text-align:center;
+      color:#fff;
+    }
+    small.note { color:#bcd; display:block; margin-top:8px; }
+  </style>
+</head>
+<body>
+  <div id="gameWrap">
+    <div id="hud">
+      <div class="hud-left">
+        <span class="badge">Score: <span id="score">0</span></span>
+        <span class="badge">High: <span id="high">0</span></span>
+        <span class="badge">Lives: <span id="lives">3</span></span>
+      </div>
+      <div class="hud-right">
+        <button id="pauseBtn">⏸ Pause</button>
+        <button id="restartBtn">🔁 Restart</button>
+      </div>
+    </div>
+
+    <canvas id="gameCanvas" width="900" height="600"></canvas>
+
+    <div id="menu" aria-hidden="true">
+      <div class="panel" id="gameOverMenu" style="display:none">
+        <h2 id="gomsg">Game Over</h2>
+        <div style="margin-top:10px">
+          <button id="retryBtn">Retry</button>
+          <button id="quitBtn">Quit</button>
+        </div>
+        <small class="note">Special bricks: explosive (💥), regen (♻️), teleport (🌀)</small>
+      </div>
+    </div>
+  </div>
+
+<script>
+/* ============================
+   Breakout with special bricks
+   Features:
+   - Animated starfield background
+   - Random brick colors + types (normal, explosive, regen, teleport)
+   - Power-ups (paddle enlarge, speed boost)
+   - WebAudio procedural SFX
+   - Glowing, hue-shifting paddle
+   - Explosive chain reaction
+   - Regenerating bricks (damaged -> regrow)
+   - Teleport bricks (teleport ball between them)
+   ============================ */
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+const W = canvas.width, H = canvas.height;
+
+// ---------- Audio (small helper using WebAudio) ----------
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+function playBeep(freq=440, time=0.08, type='sine', gain=0.06){
+  try{
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = type;
+    o.frequency.value = freq;
+    g.gain.value = gain;
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start();
+    o.stop(audioCtx.currentTime + time);
+  }catch(e){ /* ignore on autoplay restrictions until user interacts */ }
+}
+
+// ---------- Starfield ----------
+const stars = [];
+for(let i=0;i<120;i++){
+  stars.push({
+    x: Math.random()*W,
+    y: Math.random()*H,
+    size: Math.random()*1.6 + 0.2,
+    speed: Math.random()*0.6 + 0.2,
+    alpha: 0.4 + Math.random()*0.6
+  });
+}
+function updateStars(){ for(const s of stars){ s.y += s.speed; if(s.y>H){ s.y=0; s.x=Math.random()*W; } } }
+function drawStars(){
+  ctx.fillStyle = 'rgba(4,12,25,0.45)';
+  ctx.fillRect(0,0,W,H);
+  for(const s of stars){
+    ctx.globalAlpha = s.alpha;
+    ctx.beginPath();
+    ctx.arc(s.x,s.y,s.size,0,Math.PI*2);
+    ctx.fillStyle = 'white';
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ---------- Game variables ----------
+let score=0, lives=3;
+const scoreEl = document.getElementById('score');
+const highEl = document.getElementById('high');
+const livesEl = document.getElementById('lives');
+let highScore = Number(localStorage.getItem('breakoutHigh')) || 0;
+highEl.textContent = highScore;
+
+let gamePaused=false, gameOver=false;
+
+// Paddle
+let paddle = {
+  width: 120,
+  height: 14,
+  x: (W-120)/2,
+  hue: 150
+};
+
+// Ball
+let ball = {
+  r: 9,
+  x: W/2,
+  y: H-60,
+  dx: 3.5,
+  dy: -3.5,
+  speedMultiplier: 1
+};
+
+// Brick grid
+const brickRows = 5;
+const brickCols = 10;
+const brickW = 70;
+const brickH = 22;
+const brickPad = 10;
+const brickOffsetTop = 70;
+const brickOffsetLeft = 50;
+
+const brickTypes = ['normal','explosive','regen','teleport']; // types
+let bricks = []; // bricks[c][r] = { x,y,status,type,color, regenTimer }
+
+// helper to pick type with skewed probabilities
+function randomBrickType(){
+  // change probabilities as desired:
+  // normal: 65%, explosive: 12%, regen: 12%, teleport: 11%
+  const r = Math.random();
+  if(r < 0.65) return 'normal';
+  if(r < 0.77) return 'explosive';
+  if(r < 0.89) return 'regen';
+  return 'teleport';
+}
+
+function seedBricks(){
+  bricks = [];
+  teleportList.length = 0;
+  for(let c=0;c<brickCols;c++){
+    bricks[c]=[];
+    for(let r=0;r<brickRows;r++){
+      const x = c * (brickW + brickPad) + brickOffsetLeft;
+      const y = r * (brickH + brickPad) + brickOffsetTop;
+      const type = randomBrickType();
+      const color = `hsl(${Math.floor(Math.random()*360)}, 70%, 55%)`;
+      const b = {
+        x, y,
+        status: 1, // 1 alive, 2 damaged(regen candidate), 0 destroyed
+        type,
+        color,
+        regenTimer: null,
+        teleportId: null
+      };
+      bricks[c][r]=b;
+      if(type === 'teleport') teleportList.push({c,r});
+    }
+  }
+  // assign teleport ids for pairing convenience
+  for(let i=0;i<teleportList.length;i++){ const t=teleportList[i]; bricks[t.c][t.r].teleportId = i; }
+}
+
+// teleport list (keeps positions of teleport bricks)
+const teleportList = [];
+
+// ---------- Power-ups ----------
+let powerUps = []; // {x,y,type,vy,active}
+const powerTypes = ['paddle','speed'];
+function maybeSpawnPowerUp(px,py){
+  if(Math.random() < 0.18){
+    const type = powerTypes[Math.floor(Math.random()*powerTypes.length)];
+    powerUps.push({x: px + brickW/2, y: py + brickH/2, vy: 2.2, type, active:true});
+  }
+}
+function drawPowerUps(){
+  for(const p of powerUps){
+    if(!p.active) continue;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 10,0,Math.PI*2);
+    ctx.fillStyle = p.type==='paddle' ? '#ffd54a' : '#81d4fa';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+    ctx.stroke();
+    ctx.restore();
+    p.y += p.vy;
+    // catch
+    if(p.y > H - paddle.height - 6 &&
+       p.x > paddle.x && p.x < paddle.x + paddle.width){
+      applyPowerUp(p.type);
+      p.active=false;
+      playBeep(320, 0.12, 'square', 0.08);
+    }
+    if(p.y > H + 30) p.active=false;
+  }
+  powerUps = powerUps.filter(p=>p.active);
+}
+function applyPowerUp(type){
+  if(type==='paddle'){
+    paddle.width = Math.min(W-40, paddle.width + 50);
+    setTimeout(()=>{ paddle.width = Math.max(60, paddle.width - 50); }, 7000);
+  }else if(type==='speed'){
+    ball.dx *= 1.4; ball.dy *= 1.4;
+    setTimeout(()=>{ ball.dx /= 1.4; ball.dy /= 1.4; }, 7000);
+  }
+}
+
+// ---------- Explosive chain reaction ----------
+function explodeAt(c0, r0){
+  // destroy the brick itself, then neighbors recursively if explosive
+  const radius = 1; // neighbor radius in grid terms
+  for(let dc=-radius; dc<=radius; dc++){
+    for(let dr=-radius; dr<=radius; dr++){
+      const c = c0 + dc, r = r0 + dr;
+      if(c>=0 && c<brickCols && r>=0 && r<brickRows){
+        const b = bricks[c][r];
+        if(!b) continue;
+        if(b.status === 1 || b.status === 2){
+          // destroy it
+          b.status = 0;
+          playBeep(200 + Math.random()*300, 0.07, 'sawtooth', 0.06);
+          // if neighbor is explosive, chain reaction
+          if(b.type === 'explosive'){
+            // small delay to create ripple feeling
+            setTimeout(()=> explodeAt(c,r), 50);
+          }
+        }
+      }
+    }
+  }
+}
+
+// ---------- Regenerating bricks ----------
+function hitRegenBrick(b){
+  if(b.status === 1){
+    // first hit makes it damaged (not destroyed) — player needs to finish quickly
+    b.status = 2;
+    // start regen timer (if not destroyed within X ms, comeback)
+    if(b.regenTimer) clearTimeout(b.regenTimer);
+    b.regenTimer = setTimeout(()=>{
+      if(b.status === 2){
+        // regrow
+        b.status = 1;
+        playBeep(540,0.08,'sine',0.06);
+      }
+      b.regenTimer = null;
+    }, 3800); // regrow time
+  } else if(b.status === 2){
+    // second hit -> destroyed
+    b.status = 0;
+    if(b.regenTimer){ clearTimeout(b.regenTimer); b.regenTimer = null; }
+  }
+}
+
+// ---------- Teleport bricks ----------
+function teleportBallFrom(c0,r0){
+  // find all teleport bricks except the one we hit
+  if(teleportList.length <= 1) return; // nothing to teleport to
+  const srcId = bricks[c0][r0].teleportId;
+  const candidates = teleportList.filter((t,i)=> i !== srcId);
+  // pick a random destination
+  const dest = candidates[Math.floor(Math.random()*candidates.length)];
+  const destBrick = bricks[dest.c][dest.r];
+  // place ball at center of dest brick, small nudge in same direction
+  ball.x = destBrick.x + brickW/2;
+  ball.y = destBrick.y + brickH/2 + (ball.dy>0? ball.r+6 : -ball.r-6);
+  // to avoid immediate repeated teleport (ball still overlapping), nudge a little
+  // keep dx,dy direction but add tiny randomness
+  const signX = Math.sign(ball.dx) || 1;
+  const signY = Math.sign(ball.dy) || 1;
+  ball.dx = signX * Math.max(2, Math.abs(ball.dx) + (Math.random()-0.5));
+  ball.dy = signY * Math.max(2, Math.abs(ball.dy) + (Math.random()-0.5));
+  playBeep(880, 0.12, 'triangle', 0.07);
+}
+
+// ---------- Collision Detection with bricks ----------
+function collisionBricks(){
+  for(let c=0;c<brickCols;c++){
+    for(let r=0;r<brickRows;r++){
+      const b = bricks[c][r];
+      if(!b || b.status===0) continue;
+      // compute brick boundaries
+      const bx = b.x, by = b.y;
+      // simple AABB collision with ball center
+      if(ball.x > bx - ball.r && ball.x < bx + brickW + ball.r &&
+         ball.y > by - ball.r && ball.y < by + brickH + ball.r){
+        // consider a hit
+        // reflect ball - determine side of collision more-or-less
+        // basic: invert dy
+        // but improve: if hit on left/right sides invert dx
+        const prevX = ball.x - ball.dx, prevY = ball.y - ball.dy;
+        let collidedSide = 'top';
+        if(prevY + ball.r <= by) collidedSide = 'top';
+        else if(prevY - ball.r >= by + brickH) collidedSide = 'bottom';
+        else if(prevX + ball.r <= bx) collidedSide = 'left';
+        else if(prevX - ball.r >= bx + brickW) collidedSide = 'right';
+
+        if(collidedSide === 'left' || collidedSide === 'right'){
+          ball.dx = -ball.dx;
+        } else {
+          ball.dy = -ball.dy;
+        }
+
+        // handle brick types
+        if(b.type === 'normal'){
+          b.status = 0;
+          maybeSpawnPowerUp(bx,by);
+          playBeep(640,0.06,'sine',0.06);
+        } else if(b.type === 'explosive'){
+          // explode around grid (chain)
+          b.status = 0;
+          explodeAt(c,r);
+        } else if(b.type === 'regen'){
+          // if damaged -> destroy; if intact -> damage (start regen timer)
+          hitRegenBrick(b);
+          if(b.status===0) playBeep(700,0.06,'square',0.06);
+          else playBeep(420,0.06,'sine',0.05);
+        } else if(b.type === 'teleport'){
+          // teleport ball to another teleport brick
+          playBeep(980,0.08,'sine',0.07);
+          teleportBallFrom(c,r);
+          // don't necessarily destroy teleport brick - keep it
+        }
+        // update score and high score if brick was destroyed
+        if(b.status === 0){
+          score++;
+          scoreEl.textContent = score;
+          if(score > highScore){ highScore = score; localStorage.setItem('breakoutHigh', highScore); highEl.textContent = highScore; }
+        }
+        return; // only one brick collision processed per frame to avoid multi-flip
+      }
+    }
+  }
+}
+
+// ---------- Draw bricks ----------
+function drawBricks(){
+  for(let c=0;c<brickCols;c++){
+    for(let r=0;r<brickRows;r++){
+      const b = bricks[c][r];
+      if(!b || b.status===0) continue;
+      // visual styles by type and status
+      ctx.save();
+      if(b.type === 'explosive'){
+        // red-orange with glow
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = 'rgba(255,120,60,0.9)';
+      } else if(b.type === 'regen'){
+        // greenish, pulse if damaged
+        if(b.status === 2){
+          const pulse = 0.8 + 0.2*Math.sin(Date.now()/260);
+          ctx.globalAlpha = pulse;
+        }
+        ctx.shadowBlur = 6;
+        ctx.shadowColor = 'rgba(80,255,160,0.7)';
+      } else if(b.type === 'teleport'){
+        // blue-ish with faint inner stroke
+        ctx.shadowBlur = 8;
+        ctx.shadowColor = 'rgba(120,190,255,0.8)';
+      } else {
+        ctx.shadowBlur = 4;
+        ctx.shadowColor = 'rgba(255,255,255,0.04)';
+      }
+
+      // base rect
+      ctx.fillStyle = b.color;
+      // small overlay color for type clarity
+      if(b.type === 'explosive') ctx.fillStyle = 'linear-gradient';
+      ctx.fillRect(b.x, b.y, brickW, brickH);
+
+      // type icon / mark
+      ctx.font = '14px system-ui';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = 'rgba(20,20,20,0.35)';
+      let mark = '';
+      if(b.type === 'explosive') mark = '💥';
+      else if(b.type === 'regen') mark = '♻️';
+      else if(b.type === 'teleport') mark = '🌀';
+      if(mark){
+        ctx.fillText(mark, b.x + brickW/2, b.y + brickH/2);
+      }
+      ctx.restore();
+      // subtle border
+      ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+      ctx.strokeRect(b.x, b.y, brickW, brickH);
+    }
+  }
+}
+
+// ---------- Paddle draw ----------
+function drawPaddle(){
+  paddle.hue = (paddle.hue + 0.8) % 360;
+  ctx.save();
+  ctx.beginPath();
+  const grad = ctx.createLinearGradient(paddle.x, H-30, paddle.x + paddle.width, H-30);
+  grad.addColorStop(0, `hsl(${paddle.hue}, 80%, 46%)`);
+  grad.addColorStop(1, `hsl(${(paddle.hue+60)%360}, 70%, 56%)`);
+  ctx.fillStyle = grad;
+  ctx.shadowBlur = 18;
+  ctx.shadowColor = `hsla(${paddle.hue},85%,50%,0.65)`;
+  ctx.fillRect(paddle.x, H - paddle.height - 8, paddle.width, paddle.height);
+  ctx.restore();
+}
+
+// ---------- Ball draw ----------
+function drawBall(){
+  ctx.beginPath();
+  const g = ctx.createRadialGradient(ball.x - 3, ball.y - 3, 1, ball.x, ball.y, ball.r+4);
+  g.addColorStop(0, '#b9ffdd');
+  g.addColorStop(1, '#00b386');
+  ctx.fillStyle = g;
+  ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI*2);
+  ctx.fill();
+  ctx.closePath();
+}
+
+// ---------- HUD update ----------
+function updateHUD(){
+  scoreEl.textContent = score;
+  livesEl.textContent = lives;
+}
+
+// ---------- Controls ----------
+let rightDown=false, leftDown=false;
+document.addEventListener('keydown', e=>{
+  if(e.key === 'ArrowRight' || e.key === 'Right') rightDown = true;
+  if(e.key === 'ArrowLeft' || e.key === 'Left') leftDown = true;
+  if(e.key === ' '){ togglePause(); }
+  // resume audio on first interaction
+  if(audioCtx.state === 'suspended') audioCtx.resume();
+});
+document.addEventListener('keyup', e=>{
+  if(e.key === 'ArrowRight' || e.key === 'Right') rightDown = false;
+  if(e.key === 'ArrowLeft' || e.key === 'Left') leftDown = false;
+});
+canvas.addEventListener('mousemove', e=>{
+  const rect = canvas.getBoundingClientRect();
+  const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
+  paddle.x = Math.max(6, Math.min(W - paddle.width - 6, mx - paddle.width/2));
+});
+
+// ---------- Game mechanics ----------
+function step(){
+  if(gamePaused || gameOver) return;
+  // update stars
+  updateStars();
+
+  // move ball
+  ball.x += ball.dx;
+  ball.y += ball.dy;
+
+  // wall collisions
+  if(ball.x + ball.r > W){ ball.x = W - ball.r; ball.dx = -Math.abs(ball.dx); playBeep(420,0.04,'sine',0.04); }
+  if(ball.x - ball.r < 0){ ball.x = ball.r; ball.dx = Math.abs(ball.dx); playBeep(420,0.04,'sine',0.04); }
+  if(ball.y - ball.r < 0){ ball.y = ball.r; ball.dy = Math.abs(ball.dy); playBeep(520,0.04,'sine',0.04); }
+
+  // paddle collision
+  if(ball.y + ball.r >= H - paddle.height - 8){
+    if(ball.x > paddle.x && ball.x < paddle.x + paddle.width){
+      // reflect with angle based on hit pos
+      const hitPos = (ball.x - (paddle.x + paddle.width/2)) / (paddle.width/2);
+      const angle = hitPos * Math.PI/3; // -60 to 60 degrees
+      const speed = Math.min(7.5, Math.hypot(ball.dx, ball.dy) * 1.01);
+      ball.dx = speed * Math.sin(angle);
+      ball.dy = -Math.abs(speed * Math.cos(angle));
+      playBeep(260 + Math.abs(hitPos)*200, 0.04, 'square', 0.06);
+    } else if(ball.y - ball.r > H - 30){ // missed
+      lives--;
+      updateHUD();
+      playBeep(160,0.2,'sawtooth',0.08);
+      if(lives <= 0){
+        endGame(false);
+      }else{
+        // reset ball and paddle
+        resetBall();
+      }
+    }
+  }
+
+  // brick collision
+  collisionBricks();
+
+  // powerups
+  drawPowerUps();
+
+  // paddle movement from keys
+  if(rightDown && paddle.x < W - paddle.width - 6) paddle.x += 8;
+  if(leftDown && paddle.x > 6) paddle.x -= 8;
+}
+
+// ---------- draw frame ----------
+function draw(){
+  // background + stars
+  drawStars();
+
+  // bricks
+  drawBricks();
+
+  // ball
+  drawBall();
+
+  // paddle
+  drawPaddle();
+
+  // powerups (drawn inside step loop for Y movement consistency)
+  // but ensure they are visible
+  for(const p of powerUps){ if(p.active){
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 10, 0, Math.PI*2);
+    ctx.fillStyle = p.type==='paddle' ? '#ffd54a' : '#81d4fa';
+    ctx.fill();
+    ctx.closePath();
+  }}
+
+  // HUD overlay (score etc are DOM but we keep minor on-canvas text too)
+  ctx.font = '14px system-ui';
+  ctx.fillStyle = 'rgba(255,255,255,0.08)';
+  ctx.fillText('Special bricks: 💥 explosive, ♻️ regen, 🌀 teleport', 12, H-12);
+
+  // next frame
+  if(!gameOver){
+    requestAnimationFrame(draw);
+  }
+}
+
+// ---------- Main loop combining step+draw ----------
+let ticker = null;
+function loop(){
+  step();
+  // step draws dynamic powerups as well; draw() will render whole frame
+  // schedule next step with fixed speed
+  // we'll call step at 60fps via requestAnimationFrame implicitly due to draw+requestAnimationFrame(draw)
+}
+function run(){
+  if(ticker) cancelAnimationFrame(ticker);
+  gamePaused=false;
+  gameOver=false;
+  score = 0; lives = 3;
+  updateHUD();
+  seedBricks();
+  ball.x = W/2; ball.y = H-80;
+  ball.dx = 3.5; ball.dy = -3.5;
+  paddle.x = (W - paddle.width)/2;
+  powerUps = [];
+  draw();
+  (function frame(){ step(); ticker = requestAnimationFrame(frame); })();
+}
+
+// ---------- reset ball ----------
+function resetBall(){
+  ball.x = W/2; ball.y = H-80;
+  ball.dx = 3.2 * (Math.random() > 0.5 ? 1 : -1);
+  ball.dy = -3.2;
+  paddle.x = (W - paddle.width)/2;
+}
+
+// ---------- Pause / Resume ----------
+const pauseBtn = document.getElementById('pauseBtn');
+pauseBtn.addEventListener('click', togglePause);
+function togglePause(){
+  if(gameOver) return;
+  gamePaused = !gamePaused;
+  pauseBtn.textContent = gamePaused ? '▶ Resume' : '⏸ Pause';
+  if(!gamePaused && !ticker){ run(); }
+  // when paused, stop drawing updates by cancelling animation
+  if(gamePaused && ticker){ cancelAnimationFrame(ticker); ticker = null; }
+}
+
+// ---------- Game Over / Win ----------
+const menu = document.getElementById('gameOverMenu');
+function endGame(win){
+  gameOver = true;
+  if(ticker){ cancelAnimationFrame(ticker); ticker = null; }
+  menu.style.display = 'block';
+  document.getElementById('gomsg').textContent = win ? 'You Win! 🎉' : 'Game Over 💥';
+  // Hide buttons on the HUD while ended?
+  document.getElementById('pauseBtn').style.display = 'none';
+  document.getElementById('restartBtn').style.display = 'none';
+  playBeep(win ? 1100 : 160, 0.4, win ? 'triangle' : 'sawtooth', 0.08);
+}
+document.getElementById('retryBtn').addEventListener('click', ()=>{
+  menu.style.display = 'none';
+  document.getElementById('pauseBtn').style.display = 'inline-block';
+  document.getElementById('restartBtn').style.display = 'inline-block';
+  run();
+});
+document.getElementById('quitBtn').addEventListener('click', ()=>{
+  menu.style.display = 'none';
+  document.getElementById('pauseBtn').style.display = 'none';
+  document.getElementById('restartBtn').style.display = 'none';
+  // show farewell text (DOM)
+  const wrap = document.getElementById('gameWrap');
+  const div = document.createElement('div');
+  div.style.padding = '34px';
+  div.style.textAlign = 'center';
+  div.innerHTML = '<h2 style="margin:0">Thanks for playing!</h2><p style="opacity:.8">Close the tab when ready.</p>';
+  wrap.appendChild(div);
+});
+
+// ---------- Restart ----------
+document.getElementById('restartBtn').addEventListener('click', ()=>{
+  run();
+});
+
+// ---------- Initialize everything, including drawing loop ----------
+seedBricks();
+draw();
+(function anim(){ step(); requestAnimationFrame(anim); })();
+
+// ---------- Extra: end when no bricks left ----------
+(function checkWinLoop(){
+  if(!gameOver){
+    // count remaining destructible bricks (exclude regenerating in damaged state as alive)
+    let remaining = 0;
+    for(let c=0;c<brickCols;c++) for(let r=0;r<brickRows;r++){
+      const b = bricks[c][r];
+      if(b && b.status !== 0) remaining++;
+    }
+    if(remaining === 0){
+      endGame(true);
+    }
+  }
+  setTimeout(checkWinLoop, 600);
+})();
+
+// ensure user gesture to allow audio
+document.addEventListener('pointerdown',   ()=>{ if(audioCtx.state==='suspended') audioCtx.resume(); }, {once:true});
+
+</script>
+</body>
+</html>
